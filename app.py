@@ -1,18 +1,18 @@
 """
-IHDI Explorer - Inequality-adjusted Human Development Index calculator + maps
-=============================================================================
-An informative, student-friendly Streamlit dashboard that shows EVERY input,
-goalpost, and formula needed to compute the HDI and the IHDI (UNDP methodology),
-PLUS interactive choropleth maps:
-  - Bangladesh's 8 divisions (division-level data + GeoJSON boundaries)
-  - A zoomed Khulna division with its 10 districts (hover to see info)
+IHDI Explorer - Inequality-adjusted Human Development Index: calculator + maps + forecasts
+==========================================================================================
+A student-friendly Streamlit dashboard that:
+  1. Shows every input, goalpost and formula behind the HDI and the IHDI (UNDP method).
+  2. PREDICTS future HDI / IHDI by forecasting the underlying indicators.
+  3. Maps Bangladesh's 8 divisions and Khulna's 10 districts, with a forecast-year slider
+     so the maps show projected (not just current) values. Hover any region for info.
 
-- Auto-fetches Life expectancy & GNI per capita (PPP) from the World Bank API.
-- GeoJSON boundaries are fetched at runtime from the geoBoundaries project.
-- Education values, inequality coefficients and the region-level numbers are
-  editable (pre-filled with realistic / illustrative defaults).
-- If boundaries can't load, the maps automatically fall back to bubble markers
-  using built-in centroids, so hover-info always works.
+Forecasting:
+  - Life expectancy & GNI per capita are forecast from real World Bank history
+    using a lag-based linear regression (no heavy ML deps).
+  - Education and inequality are projected with transparent annual-trend assumptions
+    you control.
+  - HDI / IHDI for each future year are then computed with the standard UNDP formula.
 
 Run locally:   streamlit run app.py
 """
@@ -29,7 +29,6 @@ import plotly.express as px
 # ----------------------------------------------------------------------
 st.set_page_config(page_title="IHDI Explorer", page_icon="🌍", layout="wide")
 
-# UNDP goalposts (minimum and maximum values) used to normalise each dimension
 GOALPOSTS = {
     "life_exp":  {"min": 20.0, "max": 85.0,    "label": "Life expectancy at birth (years)"},
     "eys":       {"min": 0.0,  "max": 18.0,    "label": "Expected years of schooling"},
@@ -42,8 +41,6 @@ WB_INDICATORS = {
     "gni":      "NY.GNP.PCAP.PP.KD",   # GNI per capita, PPP (constant 2017 international $)
 }
 
-# Editable defaults per country (latest approximate UNDP / HDR figures).
-# life_exp & gni get overwritten by the live World Bank fetch when available.
 DEFAULTS = {
     "Bangladesh": {"code": "BGD", "life_exp": 72.4, "eys": 12.4, "mys": 7.4,
                     "gni": 6500.0, "ineq_health": 21.0, "ineq_edu": 33.0, "ineq_income": 17.0},
@@ -57,14 +54,12 @@ DEFAULTS = {
                     "gni": 12600.0,"ineq_health": 14.0, "ineq_edu": 22.0, "ineq_income": 24.0},
 }
 
-# geoBoundaries (open data) GeoJSON sources. ADM1 = divisions, ADM2 = districts.
 GEOJSON_ADM1 = ("https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/"
                 "releaseData/gbOpen/BGD/ADM1/geoBoundaries-BGD-ADM1.geojson")
 GEOJSON_ADM2 = ("https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/"
                 "releaseData/gbOpen/BGD/ADM2/geoBoundaries-BGD-ADM2.geojson")
-GEO_NAME_KEY = "shapeName"  # geoBoundaries stores the admin name here
+GEO_NAME_KEY = "shapeName"
 
-# Approximate centroids (lat, lon) used for the bubble-map fallback.
 DIVISION_CENTROIDS = {
     "Barishal": (22.70, 90.37), "Chattogram": (22.90, 91.80), "Dhaka": (23.90, 90.30),
     "Khulna": (22.95, 89.30), "Mymensingh": (24.80, 90.40), "Rajshahi": (24.55, 88.80),
@@ -77,67 +72,126 @@ KHULNA_CENTROIDS = {
     "Meherpur": (23.76, 88.63),
 }
 
-# Illustrative region-level data (editable in the app). NOT official figures.
+# Illustrative region-level data (editable). NOT official figures.
+# 'Growth %/yr' lets the map forecast each region forward at its own rate.
 DIVISION_DATA = pd.DataFrame([
-    ["Dhaka",      0.690, 73.5, 7.8],
-    ["Chattogram", 0.665, 73.0, 7.2],
-    ["Khulna",     0.672, 72.8, 7.5],
-    ["Rajshahi",   0.635, 71.8, 6.6],
-    ["Rangpur",    0.602, 70.9, 5.9],
-    ["Barishal",   0.624, 71.5, 6.8],
-    ["Sylhet",     0.611, 71.2, 5.7],
-    ["Mymensingh", 0.595, 70.6, 5.6],
-], columns=["Division", "HDI (illustrative)", "Life expectancy", "Mean yrs schooling"])
+    ["Dhaka",      0.690, 73.5, 7.8, 0.9],
+    ["Chattogram", 0.665, 73.0, 7.2, 0.9],
+    ["Khulna",     0.672, 72.8, 7.5, 0.8],
+    ["Rajshahi",   0.635, 71.8, 6.6, 1.0],
+    ["Rangpur",    0.602, 70.9, 5.9, 1.1],
+    ["Barishal",   0.624, 71.5, 6.8, 1.0],
+    ["Sylhet",     0.611, 71.2, 5.7, 1.1],
+    ["Mymensingh", 0.595, 70.6, 5.6, 1.2],
+], columns=["Division", "HDI (illustrative)", "Life expectancy", "Mean yrs schooling", "Growth %/yr"])
 
 KHULNA_DATA = pd.DataFrame([
-    ["Khulna",    0.680, 73.2, 7.9],
-    ["Jashore",   0.662, 72.6, 7.3],
-    ["Kushtia",   0.641, 72.0, 6.7],
-    ["Jhenaidah", 0.633, 71.8, 6.5],
-    ["Magura",    0.624, 71.5, 6.3],
-    ["Narail",    0.629, 71.6, 6.6],
-    ["Bagerhat",  0.640, 72.1, 6.8],
-    ["Satkhira",  0.612, 71.2, 6.1],
-    ["Chuadanga", 0.620, 71.4, 6.2],
-    ["Meherpur",  0.604, 70.9, 5.9],
-], columns=["District", "HDI (illustrative)", "Life expectancy", "Mean yrs schooling"])
+    ["Khulna",    0.680, 73.2, 7.9, 0.8],
+    ["Jashore",   0.662, 72.6, 7.3, 0.9],
+    ["Kushtia",   0.641, 72.0, 6.7, 1.0],
+    ["Jhenaidah", 0.633, 71.8, 6.5, 1.0],
+    ["Magura",    0.624, 71.5, 6.3, 1.0],
+    ["Narail",    0.629, 71.6, 6.6, 1.0],
+    ["Bagerhat",  0.640, 72.1, 6.8, 0.9],
+    ["Satkhira",  0.612, 71.2, 6.1, 1.1],
+    ["Chuadanga", 0.620, 71.4, 6.2, 1.1],
+    ["Meherpur",  0.604, 70.9, 5.9, 1.2],
+], columns=["District", "HDI (illustrative)", "Life expectancy", "Mean yrs schooling", "Growth %/yr"])
 
 
 # ----------------------------------------------------------------------
 # World Bank fetch (cached)
 # ----------------------------------------------------------------------
 @st.cache_data(ttl=60 * 60 * 24)
-def fetch_wb_latest(country_code, indicator_code, max_year):
-    """Return (value, year) for the latest non-null observation up to max_year, or (None, None)."""
+def fetch_wb_series(country_code, indicator_code):
+    """Return (years, values) sorted ascending, or ([], []) on failure."""
     base = "https://api.worldbank.org/v2/country/"
-    url = (base + country_code + "/indicator/" + indicator_code +
-           "?format=json&per_page=500")
+    url = base + country_code + "/indicator/" + indicator_code + "?format=json&per_page=500"
     try:
         import requests
         rows = requests.get(url, timeout=20).json()[1]
-        obs = [(int(r["date"]), float(r["value"]))
-               for r in rows if r["value"] is not None and int(r["date"]) <= max_year]
-        if not obs:
-            return None, None
+        obs = [(int(r["date"]), float(r["value"])) for r in rows if r["value"] is not None]
         obs.sort(key=lambda x: x[0])
-        year, val = obs[-1]
-        return val, year
+        return [o[0] for o in obs], [o[1] for o in obs]
     except Exception:
+        return [], []
+
+
+def latest_from_series(years, values, max_year):
+    pairs = [(y, v) for y, v in zip(years, values) if y <= max_year]
+    if not pairs:
         return None, None
+    return pairs[-1][1], pairs[-1][0]
 
 
 @st.cache_data(ttl=60 * 60 * 24 * 7)
 def fetch_geojson(url):
-    """Fetch a GeoJSON FeatureCollection, or return None on failure."""
     try:
         import requests
-        resp = requests.get(url, timeout=30)
-        gj = resp.json()
+        gj = requests.get(url, timeout=30).json()
         if isinstance(gj, dict) and gj.get("features"):
             return gj
         return None
     except Exception:
         return None
+
+
+# ----------------------------------------------------------------------
+# Forecasting (lag-based linear regression, numpy only)
+# ----------------------------------------------------------------------
+def _fit_lag_linear(values, n_lags):
+    vals = list(map(float, values))
+    if len(vals) <= n_lags + 1:
+        return None
+    rows, ys = [], []
+    for i in range(n_lags, len(vals)):
+        rows.append([1.0, float(i)] + [vals[i - k] for k in range(1, n_lags + 1)])
+        ys.append(vals[i])
+    coef, _, _, _ = np.linalg.lstsq(np.array(rows), np.array(ys), rcond=None)
+    return coef
+
+
+def forecast_values(values, steps, n_lags=3):
+    """Forecast `steps` points beyond the last observation."""
+    vals = list(map(float, values))
+    if steps <= 0 or not vals:
+        return []
+    coef = _fit_lag_linear(vals, n_lags)
+    out = []
+    if coef is None:
+        x = np.arange(len(vals))
+        if len(vals) >= 2:
+            m, c = np.polyfit(x, vals, 1)
+        else:
+            m, c = 0.0, vals[-1]
+        for s in range(1, steps + 1):
+            out.append(float(m * (len(vals) - 1 + s) + c))
+        return out
+    for _ in range(steps):
+        idx = len(vals)
+        feat = [1.0, float(idx)] + [vals[idx - k] for k in range(1, n_lags + 1)]
+        pred = float(np.dot(coef, feat))
+        vals.append(pred)
+        out.append(pred)
+    return out
+
+
+def series_with_forecast(years, values, end_year, base_value, base_year, fallback_growth):
+    """Build {year: value} covering up to end_year. Uses WB history+forecast when
+    available; otherwise grows base_value from base_year at fallback_growth (%/yr)."""
+    if years and values:
+        d = {int(y): float(v) for y, v in zip(years, values)}
+        last = max(d)
+        if end_year > last:
+            fc = forecast_values([d[y] for y in sorted(d)], end_year - last)
+            for i, val in enumerate(fc, start=1):
+                d[last + i] = val
+        return d, True
+    # fallback: synthetic growth path
+    d = {}
+    for y in range(base_year, end_year + 1):
+        d[y] = base_value * ((1 + fallback_growth / 100.0) ** (y - base_year))
+    return d, False
 
 
 # ----------------------------------------------------------------------
@@ -157,7 +211,6 @@ def norm_name(s):
 
 
 def match_names(our_names, geo_names):
-    """Map each of our names to the matching GeoJSON shapeName (or None)."""
     geo_lookup = {}
     for g in geo_names:
         geo_lookup[norm_name(g)] = g
@@ -165,7 +218,7 @@ def match_names(our_names, geo_names):
 
 
 def build_map(df, name_col, value_col, geojson, center, zoom, title, centroids):
-    """Return a Plotly figure: choropleth if geojson matches, else bubble fallback."""
+    """Choropleth if geojson matches, else bubble fallback. Hover shows all columns."""
     hover_cols = [c for c in df.columns if c != name_col]
     use_choropleth = False
     plot_df = df.copy()
@@ -218,7 +271,6 @@ def income_index(gni):
 
 
 def compute(life_exp, eys, mys, gni, a_health, a_edu, a_income):
-    """a_* are inequality coefficients as fractions (0-1)."""
     i_health = dimension_index(life_exp, "life_exp")
     i_eys = dimension_index(eys, "eys")
     i_mys = dimension_index(mys, "mys")
@@ -256,19 +308,24 @@ def hdi_category(hdi):
 # ----------------------------------------------------------------------
 st.sidebar.header("⚙️ Inputs")
 country = st.sidebar.selectbox("Country", list(DEFAULTS.keys()))
-year = st.sidebar.slider("Reference year", 2000, 2023, 2022)
+year = st.sidebar.slider("Base year", 2000, 2023, 2022)
+horizon = st.sidebar.slider("Forecast horizon (years)", 1, 15, 8)
 d = DEFAULTS[country]
+
+# Pull full historical series once (used for both current value and forecasting)
+le_years, le_vals = fetch_wb_series(d["code"], WB_INDICATORS["life_exp"])
+gni_years, gni_vals = fetch_wb_series(d["code"], WB_INDICATORS["gni"])
 
 use_live = st.sidebar.checkbox("Auto-fetch Life expectancy & GNI (World Bank)", value=True)
 le_default, gni_default = d["life_exp"], d["gni"]
 le_note = gni_note = "default"
 if use_live:
-    le_val, le_yr = fetch_wb_latest(d["code"], WB_INDICATORS["life_exp"], year)
-    gni_val, gni_yr = fetch_wb_latest(d["code"], WB_INDICATORS["gni"], year)
-    if le_val is not None:
-        le_default, le_note = round(le_val, 2), "World Bank " + str(le_yr)
-    if gni_val is not None:
-        gni_default, gni_note = round(gni_val, 1), "World Bank " + str(gni_yr)
+    lv, ly = latest_from_series(le_years, le_vals, year)
+    gv, gy = latest_from_series(gni_years, gni_vals, year)
+    if lv is not None:
+        le_default, le_note = round(lv, 2), "World Bank " + str(ly)
+    if gv is not None:
+        gni_default, gni_note = round(gv, 1), "World Bank " + str(gy)
 
 st.sidebar.markdown("**Health & income**")
 life_exp = st.sidebar.number_input("Life expectancy (years) [" + le_note + "]",
@@ -291,16 +348,15 @@ r = compute(life_exp, eys, mys, gni, a_health / 100, a_edu / 100, a_income / 100
 # ----------------------------------------------------------------------
 # Header & headline metrics
 # ----------------------------------------------------------------------
-st.title("🌍 IHDI Explorer")
-st.caption("Inequality-adjusted Human Development Index — full UNDP calculation plus "
-           "interactive division & district maps. Figures are estimates for learning, "
-           "not official UNDP values.")
+st.title("🌍 IHDI Explorer — calculate, predict, map")
+st.caption("Inequality-adjusted Human Development Index: full UNDP calculation, "
+           "multi-year forecasts, and interactive division/district maps. "
+           "Figures are estimates for learning, not official UNDP values.")
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("HDI", round(r["hdi"], 3), help="Human Development Index (no inequality adjustment)")
-m2.metric("IHDI", round(r["ihdi"], 3), help="Inequality-adjusted HDI")
-m3.metric("Overall loss", str(round(r["overall_loss"], 1)) + "%",
-          help="How much HDI is lost due to inequality")
+m1.metric("HDI (" + str(year) + ")", round(r["hdi"], 3))
+m2.metric("IHDI (" + str(year) + ")", round(r["ihdi"], 3))
+m3.metric("Overall loss", str(round(r["overall_loss"], 1)) + "%")
 m4.metric("Category", hdi_category(r["hdi"]).split(" human")[0])
 
 st.success("**" + country + "** — " + hdi_category(r["hdi"]) +
@@ -308,24 +364,17 @@ st.success("**" + country + "** — " + hdi_category(r["hdi"]) +
            "  →  IHDI " + str(round(r["ihdi"], 3)) +
            "  (" + str(round(r["overall_loss"], 1)) + "% lost to inequality)")
 
-# ----------------------------------------------------------------------
-# What is the IHDI?
-# ----------------------------------------------------------------------
 with st.expander("📖 What is the HDI and the IHDI? (read me)", expanded=False):
     st.markdown(
         """
-**Human Development Index (HDI)** summarises a country's average achievement in three basic dimensions:
+**Human Development Index (HDI)** summarises average achievement in three dimensions:
+*a long and healthy life* (life expectancy), *knowledge* (expected & mean years of
+schooling) and *a decent standard of living* (GNI per capita). The HDI is the
+**geometric mean** of the three normalised indices.
 
-- **A long and healthy life** — measured by *life expectancy at birth*.
-- **Knowledge** — measured by *expected years of schooling* (for children) and *mean years of schooling* (for adults).
-- **A decent standard of living** — measured by *GNI per capita* (2017 PPP $).
-
-The **HDI** is the **geometric mean** of the three (normalised) dimension indices.
-
-The **Inequality-adjusted HDI (IHDI)** discounts each dimension by how unequally it
-is distributed across people. When there is no inequality, IHDI = HDI. The bigger the
-gap, the more inequality is dragging down a country's real human development. The
-**overall loss** is the percentage difference between HDI and IHDI.
+The **Inequality-adjusted HDI (IHDI)** discounts each dimension by how unequally it is
+distributed. With no inequality, IHDI = HDI; the gap (the **overall loss**) shows how
+much inequality drags down real human development.
         """
     )
 
@@ -346,9 +395,8 @@ st.dataframe(inputs_tbl, use_container_width=True, hide_index=True)
 # ----------------------------------------------------------------------
 st.header("2️⃣ Dimension indices (normalised 0–1)")
 st.markdown(
-    "Each indicator is rescaled to 0–1 using its goalposts: "
-    "`index = (value − min) / (max − min)`. Income uses logarithms because extra income "
-    "matters less at higher levels."
+    "Each indicator is rescaled to 0–1 with its goalposts: "
+    "`index = (value − min) / (max − min)`. Income uses logarithms."
 )
 c1, c2 = st.columns([1, 1])
 with c1:
@@ -372,8 +420,7 @@ st.latex(r"HDI=\left(I_{Health}\times I_{Education}\times I_{Income}\right)^{1/3
 st.header("4️⃣ Adjust for inequality → IHDI")
 st.markdown(
     "Each dimension index is multiplied by `(1 − A)`, where **A** is the Atkinson "
-    "inequality measure for that dimension (the share lost to inequality). "
-    "A is estimated from household survey / distribution data."
+    "inequality measure for that dimension."
 )
 adj_tbl = pd.DataFrame([
     ["Health", r["i_health"], a_health, r["adj_health"]],
@@ -385,114 +432,190 @@ adj_tbl["Inequality-adjusted index"] = adj_tbl["Inequality-adjusted index"].roun
 st.dataframe(adj_tbl, use_container_width=True, hide_index=True)
 st.latex(r"IHDI=\left(I^{*}_{Health}\times I^{*}_{Education}\times I^{*}_{Income}\right)^{1/3}="
          + f"{r['ihdi']:.3f}")
-st.latex(r"\text{Overall loss}=\left(1-\frac{IHDI}{HDI}\right)\times100="
-         + f"{r['overall_loss']:.1f}\\%")
 
 # ----------------------------------------------------------------------
 # 5. Charts
 # ----------------------------------------------------------------------
-st.header("5️⃣ Visual comparison")
+st.header("5️⃣ Visual comparison (current year)")
 cc1, cc2 = st.columns([3, 2])
 with cc1:
     fig = go.Figure()
     dims = ["Health", "Education", "Income"]
     fig.add_trace(go.Bar(name="Index (HDI)", x=dims,
-                         y=[r["i_health"], r["i_edu"], r["i_income"]],
-                         marker_color="#4C78A8"))
+                         y=[r["i_health"], r["i_edu"], r["i_income"]], marker_color="#4C78A8"))
     fig.add_trace(go.Bar(name="Adjusted (IHDI)", x=dims,
-                         y=[r["adj_health"], r["adj_edu"], r["adj_income"]],
-                         marker_color="#E45756"))
-    fig.update_layout(barmode="group", yaxis_title="Index (0–1)",
-                      height=400, legend=dict(orientation="h"),
+                         y=[r["adj_health"], r["adj_edu"], r["adj_income"]], marker_color="#E45756"))
+    fig.update_layout(barmode="group", yaxis_title="Index (0–1)", height=400,
+                      legend=dict(orientation="h"),
                       title="Dimension indices: before vs after inequality adjustment")
     st.plotly_chart(fig, use_container_width=True)
 with cc2:
     gauge = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=r["overall_loss"],
-        number={"suffix": "%"},
+        mode="gauge+number", value=r["overall_loss"], number={"suffix": "%"},
         title={"text": "Overall loss to inequality"},
-        gauge={"axis": {"range": [0, 50]},
-               "bar": {"color": "#E45756"},
+        gauge={"axis": {"range": [0, 50]}, "bar": {"color": "#E45756"},
                "steps": [{"range": [0, 10], "color": "#d9f0d3"},
                          {"range": [10, 25], "color": "#fdebbd"},
-                         {"range": [25, 50], "color": "#f7c0bb"}]},
-    ))
+                         {"range": [25, 50], "color": "#f7c0bb"}]}))
     gauge.update_layout(height=400)
     st.plotly_chart(gauge, use_container_width=True)
 
 # ----------------------------------------------------------------------
-# 6. Full results table + download
+# 6. PREDICTIVE: forecast HDI / IHDI forward
 # ----------------------------------------------------------------------
-st.header("6️⃣ Full results")
-summary = pd.DataFrame([
-    ["HDI", round(r["hdi"], 3)],
-    ["IHDI", round(r["ihdi"], 3)],
-    ["Overall loss (%)", round(r["overall_loss"], 1)],
-    ["Coefficient of human inequality (%)", round(r["human_inequality"], 1)],
-    ["Health index", round(r["i_health"], 3)],
-    ["Education index", round(r["i_edu"], 3)],
-    ["Income index", round(r["i_income"], 3)],
-    ["HDI category", hdi_category(r["hdi"])],
-], columns=["Metric", "Value"])
-st.dataframe(summary, use_container_width=True, hide_index=True)
-st.download_button("⬇️ Download results as CSV",
-                   summary.to_csv(index=False).encode("utf-8"),
-                   file_name=country + "_ihdi_" + str(year) + ".csv",
-                   mime="text/csv")
+st.header("6️⃣ Prediction — forecast HDI & IHDI")
+st.markdown(
+    "Life expectancy and GNI are **forecast from real World Bank history** (lag-based "
+    "linear regression). Education and inequality follow the annual-trend assumptions "
+    "below. HDI/IHDI are then recomputed for every future year."
+)
+
+with st.expander("🔧 Trend assumptions", expanded=True):
+    t1, t2, t3 = st.columns(3)
+    eys_delta = t1.number_input("Expected schooling change (yrs/yr)", -0.5, 0.5, 0.08, 0.01)
+    mys_delta = t1.number_input("Mean schooling change (yrs/yr)", -0.5, 0.5, 0.10, 0.01)
+    ineq_delta = t2.number_input("Inequality change (pp/yr, each dim)", -2.0, 2.0, -0.3, 0.1)
+    le_fallback = t3.number_input("Life exp. growth if no data (%/yr)", -1.0, 2.0, 0.2, 0.1)
+    gni_fallback = t3.number_input("GNI growth if no data (%/yr)", -2.0, 8.0, 3.0, 0.1)
+
+end_year = year + horizon
+le_dict, le_live = series_with_forecast(le_years, le_vals, end_year, life_exp, year, le_fallback)
+gni_dict, gni_live = series_with_forecast(gni_years, gni_vals, end_year, gni, year, gni_fallback)
+
+proj_rows = []
+for Y in range(year, end_year + 1):
+    ahead = Y - year
+    le_Y = le_dict.get(Y, life_exp)
+    gni_Y = gni_dict.get(Y, gni)
+    eys_Y = min(18.0, max(0.0, eys + ahead * eys_delta))
+    mys_Y = min(15.0, max(0.0, mys + ahead * mys_delta))
+    ah = max(0.0, a_health + ahead * ineq_delta) / 100.0
+    ae = max(0.0, a_edu + ahead * ineq_delta) / 100.0
+    ai = max(0.0, a_income + ahead * ineq_delta) / 100.0
+    rr = compute(le_Y, eys_Y, mys_Y, gni_Y, ah, ae, ai)
+    proj_rows.append([Y, round(le_Y, 2), round(gni_Y, 0), round(rr["hdi"], 3),
+                      round(rr["ihdi"], 3), round(rr["overall_loss"], 1)])
+proj = pd.DataFrame(proj_rows, columns=["Year", "Life expectancy", "GNI per capita",
+                                        "HDI", "IHDI", "Loss %"])
+
+p1, p2, p3 = st.columns(3)
+p1.metric("HDI " + str(end_year), proj["HDI"].iloc[-1],
+          delta=round(proj["HDI"].iloc[-1] - r["hdi"], 3))
+p2.metric("IHDI " + str(end_year), proj["IHDI"].iloc[-1],
+          delta=round(proj["IHDI"].iloc[-1] - r["ihdi"], 3))
+p3.metric("Projected category " + str(end_year),
+          hdi_category(proj["HDI"].iloc[-1]).split(" human")[0])
+
+fc_fig = go.Figure()
+fc_fig.add_trace(go.Scatter(x=proj["Year"], y=proj["HDI"], mode="lines+markers",
+                            name="HDI (forecast)", line=dict(color="#4C78A8")))
+fc_fig.add_trace(go.Scatter(x=proj["Year"], y=proj["IHDI"], mode="lines+markers",
+                            name="IHDI (forecast)", line=dict(color="#E45756")))
+fc_fig.update_layout(height=420, yaxis_title="Index (0–1)", xaxis_title="Year",
+                     legend=dict(orientation="h"),
+                     title="Projected HDI & IHDI, " + str(year) + "–" + str(end_year))
+st.plotly_chart(fc_fig, use_container_width=True)
+
+# Life expectancy: historical + forecast (shows the real prediction at work)
+if le_years and le_vals:
+    le_hist = go.Figure()
+    le_hist.add_trace(go.Scatter(x=le_years, y=le_vals, mode="lines",
+                                 name="Life expectancy (history)", line=dict(color="#54A24B")))
+    fut_years = [Y for Y in le_dict if Y > max(le_years)]
+    le_hist.add_trace(go.Scatter(x=fut_years, y=[le_dict[y] for y in fut_years],
+                                 mode="lines+markers", name="Forecast",
+                                 line=dict(color="#F58518", dash="dash")))
+    le_hist.update_layout(height=360, yaxis_title="Years", xaxis_title="Year",
+                          legend=dict(orientation="h"),
+                          title="Life expectancy: World Bank history + forecast")
+    st.plotly_chart(le_hist, use_container_width=True)
+else:
+    st.info("Live World Bank history wasn't reachable, so life expectancy & GNI use the "
+            "fallback growth assumptions above for the forecast.")
+
+with st.expander("📄 Forecast table"):
+    st.dataframe(proj, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Download forecast CSV", proj.to_csv(index=False).encode("utf-8"),
+                       file_name=country + "_ihdi_forecast.csv", mime="text/csv")
 
 # ----------------------------------------------------------------------
-# 7. Maps: Bangladesh divisions + Khulna districts
+# 7. Maps (with forecast-year slider)
 # ----------------------------------------------------------------------
-st.header("7️⃣ Maps — hover a region to see its data")
-st.caption("Boundaries from the open geoBoundaries project. Region values below are "
-           "illustrative and fully editable — replace them with real division/district figures.")
+st.header("7️⃣ Maps — hover a region; slide to forecast")
+st.caption("Boundaries from the open geoBoundaries project. Region values are illustrative "
+           "and editable. Each region is projected forward at its own 'Growth %/yr'.")
 
 adm1 = fetch_geojson(GEOJSON_ADM1)
 adm2 = fetch_geojson(GEOJSON_ADM2)
 if adm1 is None and adm2 is None:
-    st.info("Live boundary files couldn't be reached right now, so the maps below use "
-            "labelled bubble markers instead (hover still shows full info).")
+    st.info("Live boundary files couldn't be reached, so maps use labelled bubble markers "
+            "instead (hover still shows full info).")
+
+
+def project_region(df, name_col, metric, fyear):
+    """Return df with a projected metric column for the chosen forecast year."""
+    ahead = fyear - year
+    out = df.copy()
+    is_hdi = "HDI" in metric
+    proj_col = metric + " (" + str(fyear) + ")"
+    growth = out["Growth %/yr"] if "Growth %/yr" in out.columns else 1.0
+    projected = out[metric] * ((1 + growth / 100.0) ** ahead)
+    if is_hdi:
+        projected = projected.clip(upper=1.0)
+    out[proj_col] = projected.round(3 if is_hdi else 1)
+    return out, proj_col
+
 
 tab1, tab2 = st.tabs(["🌏 Bangladesh — 8 divisions", "📍 Khulna division — districts"])
 
 with tab1:
-    st.subheader("Choropleth of all 8 divisions")
     div_df = st.data_editor(DIVISION_DATA, hide_index=True, use_container_width=True,
                             num_rows="fixed", key="div_editor")
-    metric_cols = [c for c in div_df.columns if c != "Division"]
-    color_by = st.selectbox("Colour the map by", metric_cols, key="div_metric")
-    fig_div, is_chor = build_map(
-        div_df, "Division", color_by, adm1,
-        center={"lat": 23.7, "lon": 90.35}, zoom=5.3,
-        title="Bangladesh divisions — " + color_by, centroids=DIVISION_CENTROIDS,
-    )
+    cset1, cset2, cset3 = st.columns([2, 2, 2])
+    metric_cols = [c for c in div_df.columns if c not in ("Division", "Growth %/yr")]
+    color_by = cset1.selectbox("Metric", metric_cols, key="div_metric")
+    forecast_on = cset2.checkbox("Forecast on map", value=True, key="div_fc")
+    fyear = cset3.slider("Forecast year", year, end_year, min(year + 5, end_year), key="div_year")
+    if forecast_on:
+        mdf, mcol = project_region(div_df, "Division", color_by, fyear)
+        ttl = "Bangladesh divisions — " + color_by + " (projected " + str(fyear) + ")"
+    else:
+        mdf, mcol = div_df, color_by
+        ttl = "Bangladesh divisions — " + color_by + " (" + str(year) + ")"
+    fig_div, is_chor = build_map(mdf, "Division", mcol, adm1,
+                                 center={"lat": 23.7, "lon": 90.35}, zoom=5.3,
+                                 title=ttl, centroids=DIVISION_CENTROIDS)
     st.plotly_chart(fig_div, use_container_width=True)
-    st.caption("Mode: " + ("GeoJSON choropleth" if is_chor else "bubble-marker fallback") +
-               ". Hover any region for its values.")
+    st.caption("Mode: " + ("GeoJSON choropleth" if is_chor else "bubble fallback") +
+               ". Hover a region for current + projected values.")
 
 with tab2:
-    st.subheader("Khulna division — 10 districts")
-    st.markdown("Khulna is one of Bangladesh's 8 divisions, made up of 10 districts. "
-                "Hover a district to see its indicators.")
+    st.markdown("Khulna is one of Bangladesh's 8 divisions, made up of 10 districts.")
     kh_df = st.data_editor(KHULNA_DATA, hide_index=True, use_container_width=True,
                            num_rows="fixed", key="kh_editor")
-    metric_cols_k = [c for c in kh_df.columns if c != "District"]
-    color_by_k = st.selectbox("Colour the map by", metric_cols_k, key="kh_metric")
-    fig_kh, is_chor_k = build_map(
-        kh_df, "District", color_by_k, adm2,
-        center={"lat": 23.05, "lon": 89.25}, zoom=7.2,
-        title="Khulna division districts — " + color_by_k, centroids=KHULNA_CENTROIDS,
-    )
+    kset1, kset2, kset3 = st.columns([2, 2, 2])
+    metric_cols_k = [c for c in kh_df.columns if c not in ("District", "Growth %/yr")]
+    color_by_k = kset1.selectbox("Metric", metric_cols_k, key="kh_metric")
+    forecast_on_k = kset2.checkbox("Forecast on map", value=True, key="kh_fc")
+    fyear_k = kset3.slider("Forecast year", year, end_year, min(year + 5, end_year), key="kh_year")
+    if forecast_on_k:
+        kdf, kcol = project_region(kh_df, "District", color_by_k, fyear_k)
+        ttl_k = "Khulna districts — " + color_by_k + " (projected " + str(fyear_k) + ")"
+    else:
+        kdf, kcol = kh_df, color_by_k
+        ttl_k = "Khulna districts — " + color_by_k + " (" + str(year) + ")"
+    fig_kh, is_chor_k = build_map(kdf, "District", kcol, adm2,
+                                  center={"lat": 23.05, "lon": 89.25}, zoom=7.2,
+                                  title=ttl_k, centroids=KHULNA_CENTROIDS)
     st.plotly_chart(fig_kh, use_container_width=True)
-    st.caption("Mode: " + ("GeoJSON choropleth" if is_chor_k else "bubble-marker fallback") +
-               ". Hover any district for its values.")
+    st.caption("Mode: " + ("GeoJSON choropleth" if is_chor_k else "bubble fallback") +
+               ". Hover a district for current + projected values.")
 
 st.divider()
 st.caption(
-    "Methodology: UNDP Human Development Report Technical Notes. "
-    "Goalposts — life expectancy 20–85, expected schooling 0–18, mean schooling 0–15, "
-    "GNI per capita 100–75,000 (2017 PPP $). Inequality coefficients come from "
-    "household survey distribution data and are editable here for exploration. "
-    "Map boundaries © geoBoundaries (open data)."
+    "Methodology: UNDP Human Development Report Technical Notes. Goalposts — life "
+    "expectancy 20–85, expected schooling 0–18, mean schooling 0–15, GNI per capita "
+    "100–75,000 (2017 PPP $). Forecasts use lag-based linear regression on World Bank "
+    "history plus transparent trend assumptions; they are estimates, not official "
+    "projections. Map boundaries © geoBoundaries (open data)."
 )
